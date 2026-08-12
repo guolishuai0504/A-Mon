@@ -1,0 +1,8 @@
+# 尾盘选股定时任务示例（北京时间）
+# 交易日 14:45 执行；请把 PATH_TO_PROJECT 换成实际路径
+
+SHELL=/bin/zsh
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# 周一到周五 14:45
+45 14 * * 1-5 cd PATH_TO_PROJECT && .venv/bin/python main.py >> PATH_TO_PROJECT/logs/cron.log 2>&1

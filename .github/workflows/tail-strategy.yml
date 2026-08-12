@@ -1,0 +1,65 @@
+name: Tail Strategy
+
+on:
+  # 北京时间 14:45 = UTC 06:45
+  schedule:
+    - cron: "45 6 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: tail-strategy
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check trading day
+        id: trading
+        run: |
+          FLAG=$(python - <<'PY'
+          from datetime import datetime, timezone, timedelta
+          import sys
+          try:
+              import akshare as ak
+              cst = timezone(timedelta(hours=8))
+              today = datetime.now(cst).strftime("%Y%m%d")
+              cal = ak.tool_trade_date_hist_sina()
+              col = "trade_date" if "trade_date" in cal.columns else cal.columns[0]
+              dates = set(cal[col].astype(str).str.replace("-", "").str.slice(0, 8))
+              sys.stdout.write("yes" if today in dates else "no")
+          except Exception as e:
+              print(f"calendar check failed, continue: {e}", file=sys.stderr)
+              sys.stdout.write("yes")
+          PY
+          )
+          echo "is_trading=$FLAG" >> "$GITHUB_OUTPUT"
+          echo "calendar result: $FLAG"
+
+      - name: Run strategy
+        if: steps.trading.outputs.is_trading == 'yes'
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_KEYWORD: 尾盘
+          DRY_RUN: "false"
+        run: python main.py
+
+      - name: Skip notice
+        if: steps.trading.outputs.is_trading != 'yes'
+        run: echo "非交易日，跳过策略"
