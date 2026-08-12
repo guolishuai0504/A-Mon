@@ -27,7 +27,18 @@ def filter_market_risk(df: pd.DataFrame, cfg: Config) -> tuple[bool, int, str]:
 
 
 def screen_universe(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """流动性 + 涨幅 + 形态粗滤（不依赖分时）。"""
+    """流动性 + 涨幅 + 换手率 + 量比 + 形态粗滤。"""
+    required_metrics = ("换手率", "量比")
+    missing_cols = [c for c in required_metrics if c not in df.columns]
+    if missing_cols:
+        raise KeyError(f"策略需要字段 {missing_cols}，当前行情未提供")
+
+    before = len(df)
+    df = df.dropna(subset=["换手率", "量比"]).copy()
+    dropped = before - len(df)
+    if dropped:
+        logger.info("因缺少换手率/量比剔除 %d 只", dropped)
+
     prefixes = cfg.code_prefixes
     mask = (
         df["代码"].str.startswith(prefixes)
@@ -35,25 +46,28 @@ def screen_universe(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         & (df["成交额"] >= cfg.amount_min)
         & (df["涨跌幅"] >= cfg.change_min)
         & (df["涨跌幅"] <= cfg.change_max)
+        & (df["换手率"] >= cfg.turnover_min)
+        & (df["换手率"] <= cfg.turnover_max)
+        & (df["量比"] >= cfg.volume_ratio_min)
         & (df["最新价"] > df["今开"])
         & (df["最新价"] > 0)
         & (df["最高"] > 0)
     )
 
-    # 换手率：东财有值才过滤；新浪无该字段则跳过
-    if "换手率" in df.columns and df["换手率"].notna().any():
-        mask &= (df["换手率"] >= cfg.turnover_min) & (df["换手率"] <= cfg.turnover_max)
-    else:
-        logger.info("无换手率数据，跳过换手过滤")
-
-    if "量比" in df.columns and df["量比"].notna().any():
-        mask &= df["量比"].fillna(0) >= cfg.volume_ratio_min
-
     out = df.loc[mask].copy()
     out["高点回撤"] = (out["最高"] - out["最新价"]) / out["最高"] * 100
     out = out[out["高点回撤"] <= cfg.max_drawdown_from_high]
     out = out[out["涨跌幅"] < 18]
-    return out.sort_values(by="涨跌幅", ascending=False)
+    # 量比高 + 换手适中的优先：后续形态分之外的二级排序键
+    out = out.sort_values(by=["涨跌幅", "量比"], ascending=False)
+    logger.info(
+        "初筛条件: 换手[%.1f, %.1f]%% 量比>=%.2f 成交额>=%.0f",
+        cfg.turnover_min,
+        cfg.turnover_max,
+        cfg.volume_ratio_min,
+        cfg.amount_min,
+    )
+    return out
 
 
 def apply_pattern_filter(candidates: pd.DataFrame, cfg: Config) -> pd.DataFrame:
@@ -84,7 +98,8 @@ def apply_pattern_filter(candidates: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         return pd.DataFrame()
 
     ranked = pd.DataFrame(rows)
-    ranked = ranked.sort_values(by=["形态分", "涨跌幅"], ascending=False)
+    # 形态分优先，其次涨幅、量比
+    ranked = ranked.sort_values(by=["形态分", "涨跌幅", "量比"], ascending=False)
     return ranked.head(cfg.top_n)
 
 
@@ -100,11 +115,13 @@ def format_report(up_count: int, picks: pd.DataFrame, source: str = "") -> str:
         pattern_note = getattr(row, "形态说明", "")
         drawdown = getattr(row, "高点回撤", None)
         turnover = getattr(row, "换手率", None)
+        vol_ratio = getattr(row, "量比", None)
         dd_txt = f" | 高回撤: {drawdown:.2f}%" if drawdown is not None and pd.notna(drawdown) else ""
-        to_txt = f" | 换手: {turnover}%" if turnover is not None and pd.notna(turnover) else ""
+        to_txt = f" | 换手: {float(turnover):.2f}%" if turnover is not None and pd.notna(turnover) else ""
+        lb_txt = f" | 量比: {float(vol_ratio):.2f}" if vol_ratio is not None and pd.notna(vol_ratio) else ""
         lines.append(
             f"{i}. {row.代码} {row.名称} | 现价: {row.最新价} | "
-            f"涨幅: {row.涨跌幅}%{to_txt}{dd_txt}"
+            f"涨幅: {row.涨跌幅}%{to_txt}{lb_txt}{dd_txt}"
         )
         if pattern_note:
             lines.append(f"   形态: {pattern_note}")
